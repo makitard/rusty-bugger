@@ -220,9 +220,6 @@ impl DisassemblyView {
             }
         }
 
-        //TEMP!!!
-        self.refresh_cache(debugee);
-
         //unwrapping is safe here since we alr know cache is not empty
         let largest_instruction = self
             .cache
