@@ -5,7 +5,7 @@
 - [ ] Better instruction cache (disassembly view)
 
 
-### Eventually
+## Eventually
 - DWARF
 - Symbols (tab & general implementation)
 - Exports tab
