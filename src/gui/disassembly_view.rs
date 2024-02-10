@@ -79,7 +79,7 @@ impl Instruction {
 pub struct DisassemblyView {
     rip: u64,
     cache: Vec<Instruction>,
-    goto_modal: Option<egui_modal::Modal>,
+
     render_goto_modal: bool,
     goto_input: String,
 }
@@ -89,7 +89,7 @@ impl DisassemblyView {
         Self {
             rip: 0,
             cache: Vec::new(),
-            goto_modal: None,
+
             render_goto_modal: false,
             goto_input: String::new(),
         }
@@ -102,6 +102,10 @@ impl DisassemblyView {
     pub fn clean_cache(&mut self) {
         self.cache
             .retain(|i| (i.addr as i128 - self.rip as i128).abs() < CACHE_RANGE as i128 * 2);
+    }
+
+    pub fn purge_cache(&mut self) {
+        self.cache.clear();
     }
 
     pub fn refresh_cache(&mut self, debugee: &Debugee) {
@@ -144,7 +148,7 @@ impl DisassemblyView {
         self.cache.sort_by(|a, b| a.addr.cmp(&b.addr));
         self.cache.dedup_by(|a, b| a.addr == b.addr);
 
-        self.clean_cache();
+        //self.clean_cache();
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, debugee: &mut Debugee) {
@@ -216,45 +220,35 @@ impl DisassemblyView {
         }
 
         if self.render_goto_modal {
-            if self.goto_modal.is_none() {
-                let mut modal = egui_modal::Modal::new(ui.ctx(), "disassembly_view_goto_modal")
-                    .with_close_on_outside_click(true);
-                modal.open();
+            let mut modal = egui_modal::Modal::new(ui.ctx(), "disassembly_view_goto_modal")
+                .with_close_on_outside_click(true);
+            modal.open();
 
-                self.goto_modal = Some(modal);
-            }
+            modal.show(|ui| {
+                modal.title(ui, "Go to (disassembly)");
 
-            if let Some(modal) = &mut self.goto_modal {
-                modal.show(|ui| {
-                    modal.title(ui, "Go to (disassembly)");
-
-                    modal.frame(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Address (hex)");
-                            ui.text_edit_singleline(&mut self.goto_input);
-                        });
-                    });
-
-                    modal.buttons(ui, |ui| {
-                        if modal.button(ui, "Go").clicked() || modal.was_outside_clicked() {
-                            modal.close();
-                            self.render_goto_modal = false;
-
-                            if let Some(hex_string) = self.goto_input.split('x').last() {
-                                if let Ok(new_address) = u64::from_str_radix(&hex_string, 16) {
-                                    self.rip = new_address;
-                                }
-                            }
-
-                            self.goto_input.clear();
-                        }
+                modal.frame(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Address (hex)");
+                        ui.text_edit_singleline(&mut self.goto_input);
                     });
                 });
-            }
 
-            if !self.render_goto_modal {
-                self.goto_modal = None;
-            }
+                modal.buttons(ui, |ui| {
+                    if modal.suggested_button(ui, "Go").clicked() || modal.was_outside_clicked() {
+                        modal.close();
+                        self.render_goto_modal = false;
+
+                        if let Some(hex_string) = self.goto_input.split('x').last() {
+                            if let Ok(new_address) = u64::from_str_radix(&hex_string, 16) {
+                                self.rip = new_address;
+                            }
+                        }
+
+                        self.goto_input.clear();
+                    }
+                });
+            });
         }
     }
 }

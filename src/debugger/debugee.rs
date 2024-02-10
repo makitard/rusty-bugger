@@ -1,4 +1,3 @@
-use std::process::Child;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
@@ -6,7 +5,7 @@ use super::breakpoint::{Breakpoint, HardwareBreakpoint, SoftwareBreakpoint};
 
 pub struct Debugee {
     pub stopped: bool,
-    pub child_process: Child,
+    pid: u32,
     _waitpid_thread: JoinHandle<()>,
     pub waitpid_communication: (Sender<i32>, Receiver<i32>),
     breakpoints: Vec<Box<dyn Breakpoint>>,
@@ -16,22 +15,19 @@ pub struct Debugee {
 }
 
 impl Debugee {
-    pub fn new(file: impl AsRef<std::path::Path>) -> Result<Self, Box<dyn std::error::Error>> {
-        let child_process = std::process::Command::new(file.as_ref()).spawn()?;
-
+    pub fn new(pid: u32) -> Result<Self, Box<dyn std::error::Error>> {
         //TODO: error check probably
-        unsafe { libc::ptrace(libc::PTRACE_ATTACH, child_process.id()) };
+        unsafe { libc::ptrace(libc::PTRACE_ATTACH, pid) };
 
         let (tx, rx) = mpsc::channel::<i32>();
 
-        let pid = child_process.id();
         let sender = tx.clone();
 
         let _waitpid_thread = std::thread::spawn(move || waitpid_thread(pid, sender));
 
         Ok(Self {
             stopped: true,
-            child_process,
+            pid,
             _waitpid_thread,
             waitpid_communication: (tx, rx),
             breakpoints: Vec::new(),
@@ -41,10 +37,20 @@ impl Debugee {
         })
     }
 
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub fn detach(&mut self) {
+        unsafe {
+            libc::ptrace(libc::PTRACE_DETACH, self.pid);
+        }
+    }
+
     /// Kills the process if it's already stopped (default ptrace behaviour)
     pub fn stop(&mut self) {
         unsafe {
-            libc::ptrace(libc::PTRACE_INTERRUPT, self.child_process.id(), 0);
+            libc::ptrace(libc::PTRACE_INTERRUPT, self.pid, 0);
         }
         self.update_context();
         self.stopped = true;
@@ -52,7 +58,7 @@ impl Debugee {
 
     pub fn r#continue(&mut self) {
         unsafe {
-            libc::ptrace(libc::PTRACE_CONT, self.child_process.id(), 0);
+            libc::ptrace(libc::PTRACE_CONT, self.pid, 0);
         }
         self.update_context();
         self.stopped = false;
@@ -60,7 +66,7 @@ impl Debugee {
 
     pub fn single_step(&mut self) {
         unsafe {
-            libc::ptrace(libc::PTRACE_SINGLESTEP, self.child_process.id());
+            libc::ptrace(libc::PTRACE_SINGLESTEP, self.pid);
         }
         self.update_context();
     }
@@ -70,7 +76,7 @@ impl Debugee {
             unsafe {
                 libc::ptrace(
                     libc::PTRACE_POKEDATA,
-                    self.child_process.id(),
+                    self.pid,
                     address + i * 8,
                     u64::from_le_bytes(data[i..i + 8].try_into().unwrap()),
                 )
@@ -89,7 +95,7 @@ impl Debugee {
         unsafe {
             libc::ptrace(
                 libc::PTRACE_POKEDATA,
-                self.child_process.id(),
+                self.pid,
                 address - left_over,
                 u64::from_le_bytes(original.try_into().unwrap()),
             )
@@ -104,7 +110,7 @@ impl Debugee {
                 read.extend_from_slice(
                     &libc::ptrace(
                         libc::PTRACE_PEEKDATA,
-                        self.child_process.id(),
+                        self.pid,
                         address + read.len(),
                         0,
                     )
@@ -118,10 +124,9 @@ impl Debugee {
 
     pub fn kill(&mut self) {
         unsafe {
-            libc::ptrace(libc::PTRACE_KILL, self.child_process.id());
-            libc::ptrace(libc::PTRACE_DETACH, self.child_process.id());
+            libc::ptrace(libc::PTRACE_KILL, self.pid);
+            libc::ptrace(libc::PTRACE_DETACH, self.pid);
         }
-        let _ = self.child_process.kill(); //just to be sure :P
     }
 
     pub fn update_context(&mut self) -> &libc::user_regs_struct {
@@ -129,7 +134,7 @@ impl Debugee {
         unsafe {
             libc::ptrace(
                 libc::PTRACE_GETREGS,
-                self.child_process.id(),
+                self.pid,
                 0,
                 &mut self.context as *mut _ as usize,
             )
@@ -145,7 +150,7 @@ impl Debugee {
         unsafe {
             libc::ptrace(
                 libc::PTRACE_POKEUSER,
-                self.child_process.id(),
+                self.pid,
                 offset,
                 value,
             );
@@ -153,7 +158,7 @@ impl Debugee {
     }
 
     pub fn read_user(&self, offset: usize) -> u64 {
-        unsafe { libc::ptrace(libc::PTRACE_PEEKUSER, self.child_process.id(), offset, 0) as u64 }
+        unsafe { libc::ptrace(libc::PTRACE_PEEKUSER, self.pid, offset, 0) as u64 }
     }
 
     pub fn breakpoints(&self) -> &Vec<Box<dyn Breakpoint>> {

@@ -24,7 +24,7 @@ macro_rules! instruction {
                 &mut modified,
                 $dirty,
                 18,
-                100.0,
+                135.0,
                 stringify!($name),
             ));
 
@@ -50,11 +50,20 @@ macro_rules! instruction {
     };
 }
 
+#[derive(Clone)]
+struct Process {
+    pid: u32,
+    exe_path: String,
+}
+
 pub struct App {
     debugee: Option<Debugee>,
     disassembly_view: DisassemblyView,
     hex_view: HexView,
     pub status: String,
+
+    render_attach_modal: bool,
+    process_list: Vec<Process>,
 }
 
 impl App {
@@ -64,6 +73,9 @@ impl App {
             disassembly_view: DisassemblyView::new(),
             hex_view: HexView::new(),
             status: String::from("Idle"),
+
+            render_attach_modal: false,
+            process_list: Vec::new(),
         }
     }
 
@@ -90,7 +102,10 @@ impl App {
                 .show()
                 != rfd::MessageDialogResult::No
             {
-                self.debugee = Some(Debugee::new(file)?);
+                let child_process = std::process::Command::new(file).spawn()?;
+
+                self.debugee = Some(Debugee::new(child_process.id())?);
+
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
                     "{WINDOW_TITLE} - {}",
                     file.file_name().unwrap().to_str().unwrap()
@@ -101,11 +116,50 @@ impl App {
         Ok(())
     }
 
+    fn refresh_process_list(&mut self) -> Result<(), Box<dyn Error>> {
+        self.process_list = std::fs::read_dir("/proc/")?
+            .into_iter()
+            .flatten()
+            .filter(|x| x.path().is_dir())
+            .map(|x| x.file_name().to_string_lossy().to_string())
+            .flat_map(|x| {
+                Ok::<_, Box<dyn Error>>(Process {
+                    pid: x.parse::<u32>()?,
+                    exe_path: std::fs::read_link(format!("/proc/{x}/exe"))?
+                        .to_string_lossy()
+                        .to_string(),
+                })
+            })
+            .filter(|x| x.pid != std::process::id())
+            .collect();
+        Ok(())
+    }
+
+    fn attach_to_process(&mut self, ctx: &egui::Context, process: &Process) -> Result<(), Box<dyn Error>> {
+        self.debugee = Some(Debugee::new(process.pid)?);
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+            "{WINDOW_TITLE} - {}",
+            process.exe_path
+        )));
+
+        Ok(())
+    }
+
     fn handle_status(&mut self, status: i32) {
         let debugee = self.debugee.as_mut().unwrap();
         debugee.update_context();
         self.disassembly_view.set_rip(debugee.context().rip);
-        //self.disassembly_view.update_cache();
+        self.disassembly_view.refresh_cache(&debugee);
+
+        self.hex_view.update_cache(debugee);
+        self.hex_view.clean_cache();
+
+        if libc::WIFEXITED(status) {
+            self.status = format!("Process exited with code {}", libc::WEXITSTATUS(status));
+            debugee.stopped = true;
+            return;
+        }
 
         let signal = libc::WSTOPSIG(status);
 
@@ -137,7 +191,59 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.render_attach_modal {
+            let mut modal = egui_modal::Modal::new(ctx, "attach_modal")
+                .with_close_on_outside_click(true);
+            modal.open();
+
+            let mut attach_process = None;
+
+            modal.show(|ui| {
+                modal.title(ui, "Attach");
+
+                modal.frame(ui, |ui| {
+                    egui::ScrollArea::new([false, true]).max_height(500.0).show(ui, |ui| {
+                        
+                        egui::Grid::new("process_list_grid").num_columns(3).show(ui, |ui| {
+                            ui.label("");
+                            ui.label("PID");
+                            ui.label("Executable");
+                            ui.end_row();
+
+                            for process in &self.process_list {
+                                if ui.button("💉").clicked() {
+                                    attach_process = Some(process.clone());
+                                }
+
+                                ui.label(process.pid.to_string());
+                                ui.label(&process.exe_path);
+                                ui.end_row();
+                            }
+                        });
+                    });
+                });
+
+                modal.buttons(ui, |ui| {
+                    if modal.suggested_button(ui, "Cancel").clicked() || modal.was_outside_clicked() || attach_process.is_some() {
+                        modal.close();
+                        self.render_attach_modal = false;
+                    }
+                });
+            });
+
+            if let Some(process) = attach_process {
+                if let Err(error) = self.attach_to_process(ctx, &process) {
+                    rfd::MessageDialog::new()
+                        .set_title(WINDOW_TITLE)
+                        .set_description(&format!("Error while attaching to process: {error}"))
+                        .set_level(rfd::MessageLevel::Error)
+                        .show();
+                }
+            }
+        }
+
         let open_shortcut = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::O);
+        let attach_shortcut = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::A);
 
         if let Some(debugee) = self.debugee.as_mut() {
             if let Ok(status) = debugee.waitpid_communication.1.try_recv() {
@@ -146,6 +252,26 @@ impl eframe::App for App {
         }
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            if !ui.ctx().wants_keyboard_input()
+                && ui.input_mut(|i| i.consume_shortcut(&open_shortcut))
+            {
+                if let Err(error) = self.open_file(ctx) {
+                    rfd::MessageDialog::new()
+                        .set_title(WINDOW_TITLE)
+                        .set_description(&format!("Error while opening file: {error}"))
+                        .set_level(rfd::MessageLevel::Error)
+                        .show();
+                }
+            }
+
+            if !ui.ctx().wants_keyboard_input()
+                && ui.input_mut(|i| i.consume_shortcut(&attach_shortcut))
+            {
+                //TODO handle
+                let _ = self.refresh_process_list();
+                self.render_attach_modal = true;
+            }
+
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     ui.set_min_width(220.0);
@@ -157,7 +283,6 @@ impl eframe::App for App {
                                 .shortcut_text(ui.ctx().format_shortcut(&open_shortcut)),
                         )
                         .clicked()
-                        || ui.input_mut(|i| i.consume_shortcut(&open_shortcut))
                     {
                         if let Err(error) = self.open_file(ctx) {
                             rfd::MessageDialog::new()
@@ -167,6 +292,18 @@ impl eframe::App for App {
                                 .show();
                         }
                         ui.close_menu();
+                    }
+
+                    if ui
+                        .add(
+                            egui::Button::new("Attach")
+                                .shortcut_text(ui.ctx().format_shortcut(&attach_shortcut)),
+                        )
+                        .clicked()
+                    {
+                        //TODO handle
+                        let _ = self.refresh_process_list();
+                        self.render_attach_modal = true;
                     }
                 });
             });
@@ -182,6 +319,25 @@ impl eframe::App for App {
             ui.add_enabled_ui(self.debugee.is_some(), |ui| {
                 egui::TopBottomPanel::top("control_bar").show_inside(ui, |ui| {
                     egui::menu::bar(ui, |ui| {
+                        //detach
+                        //TODO: icon
+                        if ui.button("DETACH").clicked() {
+                            if let Some(debugee) = self.debugee.as_mut() {
+                                debugee.detach();
+                            }
+
+                            self.debugee = None;
+
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+                                WINDOW_TITLE.to_owned(),
+                            ));
+
+                            self.hex_view.purge_cache();
+                            self.disassembly_view.purge_cache();
+                        }
+
+                        ui.separator();
+
                         if ui.button("⏹").clicked() {
                             if let Some(debugee) = self.debugee.as_mut() {
                                 debugee.kill();
@@ -191,6 +347,9 @@ impl eframe::App for App {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Title(
                                 WINDOW_TITLE.to_owned(),
                             ));
+
+                            self.hex_view.purge_cache();
+                            self.disassembly_view.purge_cache();
                         }
 
                         if ui.button("▶").clicked() {

@@ -13,9 +13,10 @@ pub struct HexView {
     address: u64,
     cursor_address: u64,
     cache: HashMap<u64, u8>,
+
     is_display_dirty: bool,
     since_last_update: std::time::SystemTime,
-    goto_modal: Option<egui_modal::Modal>,
+
     render_goto_modal: bool,
     goto_input: String,
 }
@@ -26,9 +27,10 @@ impl HexView {
             address: 0,
             cursor_address: 0,
             cache: HashMap::new(),
+
             is_display_dirty: false,
             since_last_update: std::time::SystemTime::UNIX_EPOCH,
-            goto_modal: None,
+
             render_goto_modal: false,
             goto_input: String::new(),
         }
@@ -39,7 +41,13 @@ impl HexView {
         self.cursor_address = address;
     }
 
-    fn clear_cache(&mut self) {}
+    pub fn clean_cache(&mut self) {
+        self.cache.retain(|&x, _| self.address.abs_diff(x) < CACHE_RANGE as u64 * 2);
+    }
+
+    pub fn purge_cache(&mut self) {
+        self.cache.clear();
+    }
 
     pub fn update_cache(&mut self, debugee: &mut Debugee) {
         self.since_last_update = std::time::SystemTime::now();
@@ -249,46 +257,36 @@ impl HexView {
         }
 
         if self.render_goto_modal {
-            if self.goto_modal.is_none() {
-                let mut modal = egui_modal::Modal::new(ui.ctx(), "hex_view_goto_modal")
-                    .with_close_on_outside_click(true);
-                modal.open();
+            let mut modal = egui_modal::Modal::new(ui.ctx(), "hex_view_goto_modal")
+                .with_close_on_outside_click(true);
+            modal.open();
 
-                self.goto_modal = Some(modal);
-            }
+            modal.show(|ui| {
+                modal.title(ui, "Go to (hex view)");
 
-            if let Some(modal) = &mut self.goto_modal {
-                modal.show(|ui| {
-                    modal.title(ui, "Go to (hex view)");
-
-                    modal.frame(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Address (hex)");
-                            ui.text_edit_singleline(&mut self.goto_input);
-                        });
-                    });
-
-                    modal.buttons(ui, |ui| {
-                        if modal.button(ui, "Go").clicked() || modal.was_outside_clicked() {
-                            modal.close();
-                            self.render_goto_modal = false;
-
-                            if let Some(hex_string) = self.goto_input.split('x').last() {
-                                if let Ok(new_address) = u64::from_str_radix(&hex_string, 16) {
-                                    self.address = new_address;
-                                    self.cursor_address = new_address;
-                                }
-                            }
-
-                            self.goto_input.clear();
-                        }
+                modal.frame(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Address (hex)");
+                        ui.text_edit_singleline(&mut self.goto_input);
                     });
                 });
-            }
 
-            if !self.render_goto_modal {
-                self.goto_modal = None;
-            }
+                modal.buttons(ui, |ui| {
+                    if modal.suggested_button(ui, "Go").clicked() || modal.was_outside_clicked() {
+                        modal.close();
+                        self.render_goto_modal = false;
+
+                        if let Some(hex_string) = self.goto_input.split('x').last() {
+                            if let Ok(new_address) = u64::from_str_radix(&hex_string, 16) {
+                                self.address = new_address;
+                                self.cursor_address = new_address;
+                            }
+                        }
+
+                        self.goto_input.clear();
+                    }
+                });
+            });
         }
 
         self.is_display_dirty = false;
