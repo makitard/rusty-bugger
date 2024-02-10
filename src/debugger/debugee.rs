@@ -12,6 +12,7 @@ pub struct Debugee {
     breakpoints: Vec<Box<dyn Breakpoint>>,
     context: libc::user_regs_struct,
     hardware_breakpoints: usize,
+    pub display_registers_dirty: bool,
 }
 
 impl Debugee {
@@ -36,6 +37,7 @@ impl Debugee {
             breakpoints: Vec::new(),
             context: unsafe { std::mem::zeroed() }, //this is safe trust me :)
             hardware_breakpoints: 0,
+            display_registers_dirty: false,
         })
     }
 
@@ -70,7 +72,7 @@ impl Debugee {
                     libc::PTRACE_POKEDATA,
                     self.child_process.id(),
                     address + i * 8,
-                    u64::from_le_bytes(data[i..i+8].try_into().unwrap()),
+                    u64::from_le_bytes(data[i..i + 8].try_into().unwrap()),
                 )
             };
         }
@@ -78,7 +80,11 @@ impl Debugee {
         let left_over = data.len() % 8;
 
         let mut original = self.read_memory(address - left_over, 8);
-        original.iter_mut().take(left_over).enumerate().for_each(|(i, x)| *x = data[data.len() - left_over + i]);
+        original
+            .iter_mut()
+            .take(left_over)
+            .enumerate()
+            .for_each(|(i, x)| *x = data[data.len() - left_over + i]);
 
         unsafe {
             libc::ptrace(
@@ -119,6 +125,7 @@ impl Debugee {
     }
 
     pub fn update_context(&mut self) -> &libc::user_regs_struct {
+        self.display_registers_dirty = true;
         unsafe {
             libc::ptrace(
                 libc::PTRACE_GETREGS,
@@ -146,14 +153,7 @@ impl Debugee {
     }
 
     pub fn read_user(&self, offset: usize) -> u64 {
-        unsafe {
-            libc::ptrace(
-                libc::PTRACE_PEEKUSER,
-                self.child_process.id(),
-                offset,
-                0
-            ) as u64
-        }
+        unsafe { libc::ptrace(libc::PTRACE_PEEKUSER, self.child_process.id(), offset, 0) as u64 }
     }
 
     pub fn breakpoints(&self) -> &Vec<Box<dyn Breakpoint>> {
@@ -188,8 +188,7 @@ impl Debugee {
     pub fn try_remove_breakpoint(&mut self, addr: u64) {
         let mut breakpoints = std::mem::replace(&mut self.breakpoints, Vec::new());
 
-        if let Some(breakpoint_index) = breakpoints.iter().position(|bp| bp.address() == addr)
-        {
+        if let Some(breakpoint_index) = breakpoints.iter().position(|bp| bp.address() == addr) {
             breakpoints[breakpoint_index].disable(self);
 
             if breakpoints[breakpoint_index].hardware() {
@@ -203,7 +202,11 @@ impl Debugee {
     }
 
     pub fn set_rip(&mut self, rip: u64) {
-        self.write_user(std::mem::offset_of!(libc::user, regs) + std::mem::offset_of!(libc::user_regs_struct, rip), rip);
+        self.write_user(
+            std::mem::offset_of!(libc::user, regs)
+                + std::mem::offset_of!(libc::user_regs_struct, rip),
+            rip,
+        );
         self.context.rip = rip;
     }
 }

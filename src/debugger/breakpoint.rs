@@ -46,7 +46,6 @@ impl Breakpoint for SoftwareBreakpoint {
     }
 
     fn disable(&mut self, debugee: &Debugee) {
-        
         debugee.write_memory(self.address as usize + 1, &self.original_bytes);
 
         println!("disabled");
@@ -107,8 +106,10 @@ impl Breakpoint for HardwareBreakpoint {
     fn hardware(&self) -> bool {
         true
     }
-    
+
     fn enable(&mut self, debugee: &Debugee) {
+        println!("actual dr7 {:#b}", read_dr(debugee, 7));
+
         //drX = addr
         write_dr(debugee, self.register_index, self.address);
 
@@ -129,7 +130,6 @@ impl Breakpoint for HardwareBreakpoint {
         write_dr(debugee, 7, new_dr7);
 
         println!("new_dr7 = {new_dr7:#b}");
-        println!("actual dr7 {:#b}", read_dr(debugee, 7));
     }
 
     fn disable(&mut self, debugee: &Debugee) {
@@ -159,14 +159,9 @@ impl Breakpoint for HardwareBreakpoint {
 }
 
 fn read_dr(debugee: &Debugee, idx: usize) -> u64 {
-    debugee.read_user(
-        std::mem::offset_of!(libc::user, u_debugreg) + idx * 8,
-    )
+    debugee.read_user(std::mem::offset_of!(libc::user, u_debugreg) + idx * 8)
 }
 
 fn write_dr(debugee: &Debugee, idx: usize, data: u64) {
-    debugee.write_user(
-        std::mem::offset_of!(libc::user, u_debugreg) + idx * 8,
-        data
-    );
+    debugee.write_user(std::mem::offset_of!(libc::user, u_debugreg) + idx * 8, data);
 }

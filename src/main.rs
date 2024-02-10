@@ -3,7 +3,7 @@
 mod debugger;
 mod gui;
 
-pub const WINDOW_TITLE: &str = "rusty-bugger";
+pub const WINDOW_TITLE: &str = env!("CARGO_PKG_NAME");
 
 fn main() {
     gui::app::App::new()

@@ -1,7 +1,7 @@
 ## 0.2.0
 
-- [ ] Register editing
-- [ ] Data view
+- [x] Register editing
+- [x] Data view
 - [ ] Better instruction cache (disassembly view)
 
 

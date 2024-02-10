@@ -3,18 +3,57 @@ use std::error::Error;
 use eframe::egui;
 
 use super::disassembly_view::DisassemblyView;
+use super::hex_view::HexView;
 use crate::debugger::{self, Debugee};
+use crate::gui::widgets;
 use crate::WINDOW_TITLE;
 
 macro_rules! instruction {
-    ($ui:ident, $ctx:ident, $name:ident) => {
-        $ui.label(format!("{}: {:#x}", stringify!($name).to_uppercase(), $ctx.$name));
+    ($self:ident, $ui:ident, $debugee:ident, $name:ident, $dirty:ident) => {
+        $ui.horizontal(|ui| {
+            ui.add_sized(
+                egui::vec2(32.0, 4.0),
+                egui::Label::new(format!("{}:", stringify!($name).to_uppercase())),
+            );
+
+            let mut buffer = format!("0x{:016x}", $debugee.context().$name);
+            let mut modified = false;
+
+            ui.add(widgets::editable_label(
+                &mut buffer,
+                &mut modified,
+                $dirty,
+                18,
+                100.0,
+                stringify!($name),
+            ));
+
+            if modified {
+                if let Some(hex_string) = buffer.split('x').last() {
+                    if let Ok(x) = u64::from_str_radix(&hex_string, 16) {
+                        $debugee.write_user(
+                            std::mem::offset_of!(libc::user, regs)
+                                + std::mem::offset_of!(libc::user_regs_struct, $name),
+                            x,
+                        );
+                        $debugee.update_context();
+                        $debugee.display_registers_dirty = false;
+                    } else {
+                        $self.status = format!(
+                            "Invalid value for register {}",
+                            stringify!($name).to_uppercase()
+                        );
+                    }
+                }
+            }
+        });
     };
 }
 
 pub struct App {
     debugee: Option<Debugee>,
     disassembly_view: DisassemblyView,
+    hex_view: HexView,
     pub status: String,
 }
 
@@ -23,13 +62,14 @@ impl App {
         Self {
             debugee: None,
             disassembly_view: DisassemblyView::new(),
+            hex_view: HexView::new(),
             status: String::from("Idle"),
         }
     }
 
     pub fn show(self, title: &'static str) -> Result<(), Box<dyn Error>> {
         let native_options = eframe::NativeOptions {
-            initial_window_size: Some(egui::vec2(1024.0, 576.0)),
+            viewport: egui::ViewportBuilder::default().with_inner_size(egui::vec2(1296.0, 729.0)),
             ..Default::default()
         };
 
@@ -38,18 +78,23 @@ impl App {
         Ok(())
     }
 
-    fn open_file(&mut self) -> Result<(), Box<dyn Error>> {
+    fn open_file(&mut self, ctx: &egui::Context) -> Result<(), Box<dyn Error>> {
         let file = rfd::FileDialog::new().set_title("Open binary").pick_file();
 
-        if let Some(file) = file {
+        if let Some(ref file) = file {
             if rfd::MessageDialog::new()
                 .set_title(WINDOW_TITLE)
                 .set_level(rfd::MessageLevel::Warning)
                 .set_description(&format!("Are you sure you want to open {file:?}"))
                 .set_buttons(rfd::MessageButtons::YesNo)
                 .show()
+                != rfd::MessageDialogResult::No
             {
                 self.debugee = Some(Debugee::new(file)?);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+                    "{WINDOW_TITLE} - {}",
+                    file.file_name().unwrap().to_str().unwrap()
+                )));
             }
         }
 
@@ -63,12 +108,14 @@ impl App {
         //self.disassembly_view.update_cache();
 
         let signal = libc::WSTOPSIG(status);
+
         //:P
         let signal_kind = if signal < 32 && signal > 0 {
             unsafe { *(&signal as *const i32 as *const debugger::Signal) }
         } else {
             debugger::Signal::UNKNOWN
         };
+
         self.status = format!("Received stop signal {:?} ({})", signal_kind, signal);
 
         if libc::WIFSTOPPED(status) {
@@ -76,7 +123,10 @@ impl App {
             if libc::WSTOPSIG(status) == libc::SIGTRAP {
                 let rip = debugee.context().rip - 1;
 
-                if let Some(bp) = debugee.breakpoint_at_address(rip) && !bp.hardware() {
+                //TODO fix breakpoints completely, they broke again xddddddddddddddddddddddddddddddddddd
+                if let Some(bp) = debugee.breakpoint_at_address(rip)
+                    && !bp.hardware()
+                {
                     let new_rip = rip + bp.size() as u64;
                     debugee.set_rip(new_rip);
                 }
@@ -109,7 +159,7 @@ impl eframe::App for App {
                         .clicked()
                         || ui.input_mut(|i| i.consume_shortcut(&open_shortcut))
                     {
-                        if let Err(error) = self.open_file() {
+                        if let Err(error) = self.open_file(ctx) {
                             rfd::MessageDialog::new()
                                 .set_title(WINDOW_TITLE)
                                 .set_description(&format!("Error while opening file: {error}"))
@@ -138,6 +188,9 @@ impl eframe::App for App {
                             }
 
                             self.debugee = None;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+                                WINDOW_TITLE.to_owned(),
+                            ));
                         }
 
                         if ui.button("▶").clicked() {
@@ -166,55 +219,59 @@ impl eframe::App for App {
                                     debugee.single_step();
                                 } else {
                                     self.status = String::from("Can't single step while unstopped");
-                                    //unstopped? unpaused? running? whatever, i'll use unstopped for consistency reasons but it rly doesn't make sense
+                                    //unstopped? unpaused? running? whatever, i'll use unstopped for consistency but it rly doesn't make sense
                                 }
                             }
                         }
                     });
                 });
 
-                egui::TopBottomPanel::bottom("data").show_inside(ui, |ui| {
-                    ui.label("data");
-                });
+                egui::TopBottomPanel::bottom("data")
+                    .min_height(200.0)
+                    .show_inside(ui, |ui| {
+                        self.hex_view.show(ui, &mut self.debugee);
+                    });
 
                 egui::SidePanel::right("registers")
-                    .min_width(175.0)
+                    .min_width(275.0)
+                    .max_width(300.0)
                     .show_inside(ui, |ui| {
-                        if let Some(debugee) = self.debugee.as_ref() {
-                            //TODO: add editing (need a custom widget probably)
-                            let ctx = debugee.context();
+                        if let Some(debugee) = self.debugee.as_mut() {
+                            let is_dirty = debugee.display_registers_dirty;
 
-                            instruction!(ui, ctx, rsp);
-
-                            ui.separator();
-
-                            instruction!(ui, ctx, rax);
-                            instruction!(ui, ctx, rbx);
-                            instruction!(ui, ctx, rcx);
-                            instruction!(ui, ctx, rdx);
+                            instruction!(self, ui, debugee, rax, is_dirty);
+                            instruction!(self, ui, debugee, rbx, is_dirty);
+                            instruction!(self, ui, debugee, rcx, is_dirty);
+                            instruction!(self, ui, debugee, rdx, is_dirty);
 
                             ui.separator();
 
-                            instruction!(ui, ctx, r8);
-                            instruction!(ui, ctx, r9);
-                            instruction!(ui, ctx, r10);
-                            instruction!(ui, ctx, r11);
-                            instruction!(ui, ctx, r12);
-                            instruction!(ui, ctx, r13);
-                            instruction!(ui, ctx, r14);
-                            instruction!(ui, ctx, r15);
+                            instruction!(self, ui, debugee, r8, is_dirty);
+                            instruction!(self, ui, debugee, r9, is_dirty);
+                            instruction!(self, ui, debugee, r10, is_dirty);
+                            instruction!(self, ui, debugee, r11, is_dirty);
+                            instruction!(self, ui, debugee, r12, is_dirty);
+                            instruction!(self, ui, debugee, r13, is_dirty);
+                            instruction!(self, ui, debugee, r14, is_dirty);
+                            instruction!(self, ui, debugee, r15, is_dirty);
 
                             ui.separator();
 
-                            instruction!(ui, ctx, rsi);
-                            instruction!(ui, ctx, rdi);
+                            instruction!(self, ui, debugee, rsi, is_dirty);
+                            instruction!(self, ui, debugee, rdi, is_dirty);
 
                             ui.separator();
 
-                            instruction!(ui, ctx, rbp);
-                            instruction!(ui, ctx, rsp);
+                            instruction!(self, ui, debugee, rbp, is_dirty);
+                            instruction!(self, ui, debugee, rsp, is_dirty);
 
-                            ui.label(format!("EFLAGS: {:#b}", ctx.eflags));
+                            ui.horizontal(|ui| {
+                                ui.add_sized(egui::vec2(32.0, 4.0), egui::Label::new("EFLAGS:"));
+
+                                ui.label(format!("{:#032b}", debugee.context().eflags));
+                            });
+
+                            debugee.display_registers_dirty = false;
                         }
                     });
 

@@ -3,12 +3,6 @@ use eframe::egui;
 use iced_x86::Formatter;
 
 const CACHE_RANGE: u64 = 0x150;
-const MAX_INSTRUCTION_SIZE: usize = 15; //x86
-
-pub struct DisassemblyView {
-    rip: u64,
-    cache: Vec<Instruction>,
-}
 
 #[derive(Clone)]
 pub struct Instruction {
@@ -82,11 +76,22 @@ impl Instruction {
     }
 }
 
+pub struct DisassemblyView {
+    rip: u64,
+    cache: Vec<Instruction>,
+    goto_modal: Option<egui_modal::Modal>,
+    render_goto_modal: bool,
+    goto_input: String,
+}
+
 impl DisassemblyView {
     pub const fn new() -> Self {
         Self {
             rip: 0,
             cache: Vec::new(),
+            goto_modal: None,
+            render_goto_modal: false,
+            goto_input: String::new(),
         }
     }
 
@@ -115,7 +120,7 @@ impl DisassemblyView {
                     for (i, b) in bp.original_bytes().unwrap().iter().enumerate() {
                         data[addr as usize - cache_start as usize + i] = *b;
                     }
-                } 
+                }
             }
         }
 
@@ -124,49 +129,6 @@ impl DisassemblyView {
         while decoder.can_decode() {
             instructions.push(decoder.decode());
         }
-
-        //this sucks
-        //and doesn't work...
-        let mut back_instructions = Vec::new();
-        for _ in 0..instructions.len() {
-            let offset = back_instructions
-                .iter()
-                .fold(0, |i, x: &Instruction| i + x.inner.len());
-
-            if cache_start as usize <= offset {
-                break;
-            }
-
-            for j in 1..MAX_INSTRUCTION_SIZE {
-                //could be optimized still
-                let data = debugee
-                    .read_memory(cache_start as usize - offset - j, j + instructions[0].len());
-                let mut decoder = iced_x86::Decoder::new(64, &data, iced_x86::DecoderOptions::NONE);
-
-                let instruction = decoder.decode();
-                let next_instruction = decoder.decode();
-
-                if &next_instruction
-                    == if back_instructions.is_empty() {
-                        &instructions[0]
-                    } else {
-                        &back_instructions.last().unwrap().inner
-                    }
-                {
-                    back_instructions.push(Instruction {
-                        addr: (cache_start as usize - offset - j) as u64,
-                        bytes: data[0..j].to_vec(),
-                        inner: instruction,
-                    });
-                    //println!("asiudhasd");
-                    break;
-                } else {
-                    //println!("URGH!!!");
-                }
-            }
-        }
-
-        self.cache.append(&mut back_instructions);
 
         self.cache.extend_from_slice(
             &instructions
@@ -181,42 +143,49 @@ impl DisassemblyView {
 
         self.cache.sort_by(|a, b| a.addr.cmp(&b.addr));
         self.cache.dedup_by(|a, b| a.addr == b.addr);
+
+        self.clean_cache();
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, debugee: &mut Debugee) {
-        self.clean_cache();
+        let rect = egui::Rect::from_min_size(ui.next_widget_position(), ui.available_size());
 
-        let scroll_delta = ui.input(|input| input.scroll_delta);
-        let instruction_index =
-            if let Some(index) = self.cache.iter().position(|x| x.addr == self.rip) && !self.cache.is_empty() {
-                index
-            } else {
-                //rip is invalid or smth :P
-                ui.label("RIP is invalid or the current memory region has not been cached");
-                self.refresh_cache(debugee);
-                return;
-            };
+        let instruction_index = if let Some(index) =
+            self.cache.iter().position(|x| x.addr == self.rip)
+            && !self.cache.is_empty()
+        {
+            index
+        } else {
+            //rip is invalid or smth :P
+            ui.label("RIP is invalid or the current memory region has not been cached");
+            self.refresh_cache(debugee);
+            return;
+        };
 
-        if scroll_delta.y < 0.0 {
-            //scroll down
-            let estimated_amount_of_instructions_per_page = ui.available_height() / 16.0;
-            if instruction_index + estimated_amount_of_instructions_per_page as usize
-                > self.cache.len()
+        if ui.rect_contains_pointer(rect) {
+            let scroll_delta = ui.input(|input| input.raw_scroll_delta);
+
+            if scroll_delta.y < 0.0 {
+                //scroll down
+                let estimated_amount_of_instructions_per_page = ui.available_height() / 16.0;
+                if instruction_index + estimated_amount_of_instructions_per_page as usize
+                    > self.cache.len()
+                {
+                    self.refresh_cache(debugee);
+                }
+
+                self.rip += self.cache[instruction_index].inner.len() as u64;
+            } else if scroll_delta.y > 0.0 {
+                if instruction_index != 0 {
+                    self.rip -= self.cache[instruction_index - 1].inner.len() as u64;
+                }
+            }
+
+            if ui
+                .ctx()
+                .input_mut(|x| x.consume_key(egui::Modifiers::CTRL, egui::Key::G))
             {
-                self.refresh_cache(debugee);
-            }
-
-            self.rip += self.cache[instruction_index].inner.len() as u64;
-        } else if scroll_delta.y > 0.0 {
-
-            //scroll up
-            if instruction_index == 0 {
-                //should this be done here?
-                self.refresh_cache(debugee);
-            }
-
-            if instruction_index != 0 {
-                self.rip -= self.cache[instruction_index - 1].inner.len() as u64;
+                self.render_goto_modal = true;
             }
         }
 
@@ -244,6 +213,48 @@ impl DisassemblyView {
             ui.separator();
 
             i += 1;
+        }
+
+        if self.render_goto_modal {
+            if self.goto_modal.is_none() {
+                let mut modal = egui_modal::Modal::new(ui.ctx(), "disassembly_view_goto_modal")
+                    .with_close_on_outside_click(true);
+                modal.open();
+
+                self.goto_modal = Some(modal);
+            }
+
+            if let Some(modal) = &mut self.goto_modal {
+                modal.show(|ui| {
+                    modal.title(ui, "Go to (disassembly)");
+
+                    modal.frame(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Address (hex)");
+                            ui.text_edit_singleline(&mut self.goto_input);
+                        });
+                    });
+
+                    modal.buttons(ui, |ui| {
+                        if modal.button(ui, "Go").clicked() || modal.was_outside_clicked() {
+                            modal.close();
+                            self.render_goto_modal = false;
+
+                            if let Some(hex_string) = self.goto_input.split('x').last() {
+                                if let Ok(new_address) = u64::from_str_radix(&hex_string, 16) {
+                                    self.rip = new_address;
+                                }
+                            }
+
+                            self.goto_input.clear();
+                        }
+                    });
+                });
+            }
+
+            if !self.render_goto_modal {
+                self.goto_modal = None;
+            }
         }
     }
 }

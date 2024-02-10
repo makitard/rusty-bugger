@@ -17,7 +17,9 @@ int main() {
 
     stuff(&x);
 
-    printf("x: %i, g_global: %i, &x: %p, &g_global: %p", x, g_global, &x, &g_global);
+    asm("int3");
+
+    printf("x: %i, g_global: %i, &x: %p, &g_global: %p\n", x, g_global, &x, &g_global);
 
     return 0x1337;
 }
