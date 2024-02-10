@@ -11,3 +11,4 @@
 - Exports tab
 - Modules tab
 - Breakpoint tab
+- Data R/W breakpoints
