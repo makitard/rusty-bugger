@@ -99,6 +99,7 @@ impl DisassemblyView {
         self.rip = rip;
     }
 
+    #[allow(unused)]
     pub fn clean_cache(&mut self) {
         self.cache
             .retain(|i| (i.addr as i128 - self.rip as i128).abs() < CACHE_RANGE as i128 * 2);
@@ -161,8 +162,10 @@ impl DisassemblyView {
             index
         } else {
             //rip is invalid or smth :P
-            ui.label("RIP is invalid or the current memory region has not been cached");
-            self.refresh_cache(debugee);
+            ui.label("RIP is invalid or the current memory region has not been yet cached");
+            if debugee.stopped {
+                self.refresh_cache(debugee);
+            }
             return;
         };
 
@@ -173,7 +176,7 @@ impl DisassemblyView {
                 //scroll down
                 let estimated_amount_of_instructions_per_page = ui.available_height() / 16.0;
                 if instruction_index + estimated_amount_of_instructions_per_page as usize
-                    > self.cache.len()
+                    > self.cache.len() && debugee.stopped
                 {
                     self.refresh_cache(debugee);
                 }
@@ -220,7 +223,7 @@ impl DisassemblyView {
         }
 
         if self.render_goto_modal {
-            let mut modal = egui_modal::Modal::new(ui.ctx(), "disassembly_view_goto_modal")
+            let modal = egui_modal::Modal::new(ui.ctx(), "disassembly_view_goto_modal")
                 .with_close_on_outside_click(true);
             modal.open();
 

@@ -8,6 +8,8 @@ use crate::debugger::{self, Debugee};
 use crate::gui::widgets;
 use crate::WINDOW_TITLE;
 
+const REGISTER_REFRESH_RATE: f32 = 1.0;
+
 macro_rules! instruction {
     ($self:ident, $ui:ident, $debugee:ident, $name:ident, $dirty:ident) => {
         $ui.horizontal(|ui| {
@@ -37,7 +39,7 @@ macro_rules! instruction {
                             x,
                         );
                         $debugee.update_context();
-                        $debugee.display_registers_dirty = false;
+                        $self.regs_dirty = true;
                     } else {
                         $self.status = format!(
                             "Invalid value for register {}",
@@ -62,6 +64,9 @@ pub struct App {
     hex_view: HexView,
     pub status: String,
 
+    since_reg_refresh: std::time::SystemTime,
+    regs_dirty: bool,
+
     render_attach_modal: bool,
     process_list: Vec<Process>,
 }
@@ -73,6 +78,9 @@ impl App {
             disassembly_view: DisassemblyView::new(),
             hex_view: HexView::new(),
             status: String::from("Idle"),
+
+            since_reg_refresh: std::time::SystemTime::UNIX_EPOCH,
+            regs_dirty: false,
 
             render_attach_modal: false,
             process_list: Vec::new(),
@@ -135,7 +143,11 @@ impl App {
         Ok(())
     }
 
-    fn attach_to_process(&mut self, ctx: &egui::Context, process: &Process) -> Result<(), Box<dyn Error>> {
+    fn attach_to_process(
+        &mut self,
+        ctx: &egui::Context,
+        process: &Process,
+    ) -> Result<(), Box<dyn Error>> {
         self.debugee = Some(Debugee::new(process.pid)?);
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
@@ -174,6 +186,8 @@ impl App {
 
         if libc::WIFSTOPPED(status) {
             debugee.stopped = true;
+            self.regs_dirty = true;
+
             if libc::WSTOPSIG(status) == libc::SIGTRAP {
                 let rip = debugee.context().rip - 1;
 
@@ -191,9 +205,20 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(debugee) = &mut self.debugee && debugee.stopped {
+            if std::time::SystemTime::now().duration_since(self.since_reg_refresh).map(|x| x > std::time::Duration::from_secs_f32(1.0 / REGISTER_REFRESH_RATE)).unwrap_or(false) {
+                self.regs_dirty = true;
+                self.since_reg_refresh = std::time::SystemTime::now();
+            }
+
+            if self.regs_dirty {
+                debugee.update_context();
+            }
+        }
+
         if self.render_attach_modal {
-            let mut modal = egui_modal::Modal::new(ctx, "attach_modal")
-                .with_close_on_outside_click(true);
+            let modal =
+                egui_modal::Modal::new(ctx, "attach_modal").with_close_on_outside_click(true);
             modal.open();
 
             let mut attach_process = None;
@@ -202,29 +227,39 @@ impl eframe::App for App {
                 modal.title(ui, "Attach");
 
                 modal.frame(ui, |ui| {
-                    egui::ScrollArea::new([false, true]).max_height(500.0).show(ui, |ui| {
-                        
-                        egui::Grid::new("process_list_grid").num_columns(3).show(ui, |ui| {
-                            ui.label("");
-                            ui.label("PID");
-                            ui.label("Executable");
-                            ui.end_row();
+                    egui::ScrollArea::new([false, true])
+                        .max_height(500.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new("process_list_grid")
+                                .num_columns(3)
+                                .show(ui, |ui| {
+                                    ui.label("");
+                                    ui.label("PID");
+                                    ui.label("Executable");
+                                    ui.end_row();
 
-                            for process in &self.process_list {
-                                if ui.button("💉").clicked() {
-                                    attach_process = Some(process.clone());
-                                }
+                                    for process in &self.process_list {
+                                        if ui.button("💉").clicked() {
+                                            attach_process = Some(process.clone());
+                                        }
 
-                                ui.label(process.pid.to_string());
-                                ui.label(&process.exe_path);
-                                ui.end_row();
-                            }
+                                        ui.label(process.pid.to_string());
+                                        ui.label(&process.exe_path);
+                                        ui.end_row();
+                                    }
+                                });
                         });
-                    });
                 });
 
                 modal.buttons(ui, |ui| {
-                    if modal.suggested_button(ui, "Cancel").clicked() || modal.was_outside_clicked() || attach_process.is_some() {
+                    if modal.button(ui, "Refresh").clicked() {
+                        let _ = self.refresh_process_list();
+                    }
+
+                    if modal.suggested_button(ui, "Cancel").clicked()
+                        || modal.was_outside_clicked()
+                        || attach_process.is_some()
+                    {
                         modal.close();
                         self.render_attach_modal = false;
                     }
@@ -396,7 +431,7 @@ impl eframe::App for App {
                     .max_width(300.0)
                     .show_inside(ui, |ui| {
                         if let Some(debugee) = self.debugee.as_mut() {
-                            let is_dirty = debugee.display_registers_dirty;
+                            let is_dirty = self.regs_dirty;
 
                             instruction!(self, ui, debugee, rax, is_dirty);
                             instruction!(self, ui, debugee, rbx, is_dirty);
@@ -430,7 +465,7 @@ impl eframe::App for App {
                                 ui.label(format!("{:#032b}", debugee.context().eflags));
                             });
 
-                            debugee.display_registers_dirty = false;
+                            self.regs_dirty = false;
                         }
                     });
 

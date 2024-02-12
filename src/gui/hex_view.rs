@@ -36,13 +36,9 @@ impl HexView {
         }
     }
 
-    pub fn set_address(&mut self, address: u64) {
-        self.address = address;
-        self.cursor_address = address;
-    }
-
     pub fn clean_cache(&mut self) {
-        self.cache.retain(|&x, _| self.address.abs_diff(x) < CACHE_RANGE as u64 * 2);
+        self.cache
+            .retain(|&x, _| self.address.abs_diff(x) < CACHE_RANGE as u64 * 2);
     }
 
     pub fn purge_cache(&mut self) {
@@ -66,10 +62,9 @@ impl HexView {
 
     pub fn show(&mut self, ui: &mut egui::Ui, debugee: &mut Option<Debugee>) {
         if let Some(debugee) = debugee {
-            if std::time::SystemTime::now()
-                .duration_since(self.since_last_update)
-                .unwrap_or_default()
-                > std::time::Duration::from_secs_f32(1.0 / REFRESH_RATE)
+            if debugee.stopped && std::time::SystemTime::now()
+                .duration_since(self.since_last_update).map(|x|
+                x > std::time::Duration::from_secs_f32(1.0 / REFRESH_RATE)).unwrap_or(false)
             {
                 self.update_cache(debugee);
                 ui.ctx().request_repaint();
@@ -257,7 +252,7 @@ impl HexView {
         }
 
         if self.render_goto_modal {
-            let mut modal = egui_modal::Modal::new(ui.ctx(), "hex_view_goto_modal")
+            let modal = egui_modal::Modal::new(ui.ctx(), "hex_view_goto_modal")
                 .with_close_on_outside_click(true);
             modal.open();
 

@@ -11,13 +11,14 @@ pub struct Debugee {
     breakpoints: Vec<Box<dyn Breakpoint>>,
     context: libc::user_regs_struct,
     hardware_breakpoints: usize,
-    pub display_registers_dirty: bool,
 }
 
 impl Debugee {
     pub fn new(pid: u32) -> Result<Self, Box<dyn std::error::Error>> {
         //TODO: error check probably
-        unsafe { libc::ptrace(libc::PTRACE_ATTACH, pid) };
+        unsafe {
+            libc::ptrace(libc::PTRACE_SEIZE, pid, 0, 0);
+        }
 
         let (tx, rx) = mpsc::channel::<i32>();
 
@@ -26,19 +27,14 @@ impl Debugee {
         let _waitpid_thread = std::thread::spawn(move || waitpid_thread(pid, sender));
 
         Ok(Self {
-            stopped: true,
+            stopped: false,
             pid,
             _waitpid_thread,
             waitpid_communication: (tx, rx),
             breakpoints: Vec::new(),
             context: unsafe { std::mem::zeroed() }, //this is safe trust me :)
             hardware_breakpoints: 0,
-            display_registers_dirty: false,
         })
-    }
-
-    pub fn pid(&self) -> u32 {
-        self.pid
     }
 
     pub fn detach(&mut self) {
@@ -50,17 +46,19 @@ impl Debugee {
     /// Kills the process if it's already stopped (default ptrace behaviour)
     pub fn stop(&mut self) {
         unsafe {
-            libc::ptrace(libc::PTRACE_INTERRUPT, self.pid, 0);
+            libc::ptrace(libc::PTRACE_INTERRUPT, self.pid, 0, 0);
         }
         self.update_context();
         self.stopped = true;
     }
 
     pub fn r#continue(&mut self) {
-        unsafe {
-            libc::ptrace(libc::PTRACE_CONT, self.pid, 0);
-        }
         self.update_context();
+        unsafe {
+            //yes, two calls are required
+            libc::ptrace(libc::PTRACE_CONT, self.pid, 0, 0);
+            libc::ptrace(libc::PTRACE_CONT, self.pid, 0, 0);
+        }
         self.stopped = false;
     }
 
@@ -70,6 +68,8 @@ impl Debugee {
         }
         self.update_context();
     }
+
+    //TODO: use /proc/<pid>/mem for io!!!
 
     pub fn write_memory(&self, address: usize, data: &[u8]) {
         for i in 0..(data.len() as f32 / 8.0).floor() as usize {
@@ -108,13 +108,8 @@ impl Debugee {
         while read.len() < size {
             unsafe {
                 read.extend_from_slice(
-                    &libc::ptrace(
-                        libc::PTRACE_PEEKDATA,
-                        self.pid,
-                        address + read.len(),
-                        0,
-                    )
-                    .to_le_bytes(),
+                    &libc::ptrace(libc::PTRACE_PEEKDATA, self.pid, address + read.len(), 0)
+                        .to_le_bytes(),
                 );
             }
         }
@@ -124,21 +119,20 @@ impl Debugee {
 
     pub fn kill(&mut self) {
         unsafe {
-            libc::ptrace(libc::PTRACE_KILL, self.pid);
+            libc::kill(self.pid as i32, libc::SIGKILL);
             libc::ptrace(libc::PTRACE_DETACH, self.pid);
         }
     }
 
     pub fn update_context(&mut self) -> &libc::user_regs_struct {
-        self.display_registers_dirty = true;
         unsafe {
             libc::ptrace(
                 libc::PTRACE_GETREGS,
                 self.pid,
                 0,
                 &mut self.context as *mut _ as usize,
-            )
-        };
+            );
+        }
         &self.context
     }
 
@@ -148,12 +142,7 @@ impl Debugee {
 
     pub fn write_user(&self, offset: usize, value: u64) {
         unsafe {
-            libc::ptrace(
-                libc::PTRACE_POKEUSER,
-                self.pid,
-                offset,
-                value,
-            );
+            libc::ptrace(libc::PTRACE_POKEUSER, self.pid, offset, value);
         }
     }
 
@@ -167,10 +156,6 @@ impl Debugee {
 
     pub fn breakpoint_at_address(&mut self, addr: u64) -> Option<&mut Box<dyn Breakpoint>> {
         self.breakpoints.iter_mut().find(|bp| bp.address() == addr)
-    }
-
-    pub fn is_breakpoint_at(&self, addr: u64) -> bool {
-        self.breakpoints.iter().any(|bp| bp.address() == addr)
     }
 
     pub fn add_software_breakpoint(&mut self, addr: u64 /*hardware: bool*/, size: u64) {
